@@ -3,13 +3,16 @@
 Credentials come from AWS Secrets Manager (DB_SECRET_ARN). For local dev you
 can instead set DB_HOST / DB_PORT / DB_NAME / DB_USER / DB_PASSWORD directly.
 """
+
 import json
 import os
 from functools import lru_cache
 
 CERT_PATH = os.environ.get(
     "DB_SSLROOTCERT",
-    os.path.join(os.path.dirname(os.path.dirname(__file__)), "certs", "global-bundle.pem"),
+    os.path.join(
+        os.path.dirname(os.path.dirname(__file__)), "certs", "global-bundle.pem"
+    ),
 )
 
 
@@ -19,11 +22,15 @@ def _bool(name: str, default: bool) -> bool:
 
 # Turn on once the frontend sends the X-Session-Id header (see README).
 AUTH_ENFORCED = _bool("AUTH_ENFORCED", False)
-SESSION_HOURS = int(os.environ.get("SESSION_HOURS", "12"))   # matches the 12h the frontend uses
+SESSION_HOURS = int(
+    os.environ.get("SESSION_HOURS", "168")
+)  # matches the 12h the frontend uses
 S3_BUCKET = os.environ.get("S3_BUCKET", "solar-farm-uploads")
 S3_REGION = os.environ.get("S3_REGION", "ap-southeast-2")
 S3_PUBLIC_BASE = f"https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com"
-TIMEZONE = os.environ.get("TIMEZONE", "Australia/Adelaide")   # used only when the app sends no work_date
+TIMEZONE = os.environ.get(
+    "TIMEZONE", "Australia/Adelaide"
+)  # used only when the app sends no work_date
 
 # Solar farm layout
 BLOCKS = 25
@@ -57,7 +64,9 @@ def db_credentials() -> dict:
     if arn:
         import boto3  # available in the Lambda runtime
 
-        client = boto3.client("secretsmanager", region_name=os.environ.get("AWS_REGION", "ap-southeast-2"))
+        client = boto3.client(
+            "secretsmanager", region_name=os.environ.get("AWS_REGION", "ap-southeast-2")
+        )
         secret = json.loads(client.get_secret_value(SecretId=arn)["SecretString"])
         return {
             "host": secret["host"],
@@ -86,6 +95,8 @@ def conninfo() -> dict:
     else:
         # Local dev only. Production packages must include certs/global-bundle.pem.
         if os.environ.get("AWS_LAMBDA_FUNCTION_NAME"):
-            raise RuntimeError("certs/global-bundle.pem missing from the Lambda package")
+            raise RuntimeError(
+                "certs/global-bundle.pem missing from the Lambda package"
+            )
         creds = {**creds, "sslmode": "require"}
     return creds
