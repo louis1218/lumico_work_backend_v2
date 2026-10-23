@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import config
-from .routers import auth, barcode, sessions, timesheet, users, work_logs
+from .routers import auth, barcode, inspections, reports, sessions, timesheet, uploads, users, work_logs
 
 logger = logging.getLogger("lumico")
 logging.basicConfig(level=logging.INFO)
@@ -18,7 +18,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=config.CORS_ORIGINS,
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "X-Session-Id"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 
@@ -44,5 +44,6 @@ def health():
     return {"status": "ok"}
 
 
-for r in (auth.router, users.router, timesheet.router, sessions.router, work_logs.router, barcode.router):
+for r in (auth.router, users.router, timesheet.router, sessions.router, work_logs.router, barcode.router, uploads.router,
+          inspections.router, reports.router):
     app.include_router(r)

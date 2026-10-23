@@ -123,12 +123,22 @@ def test_issue_and_barcode_and_solar(fake_db):
 
 def test_auth_enforced(monkeypatch, fake_db):
     monkeypatch.setattr(config, "AUTH_ENFORCED", True)
-    assert client.get("/work-logs").status_code == 401                       # no header
-    assert client.get("/work-logs", headers={"X-Session-Id": "abc"}).status_code == 401
+    assert client.get("/work-logs").status_code == 401                                   # no token
+    assert client.get("/work-logs", headers={"Authorization": "Basic abc"}).status_code == 401
     fake_db["fetch_one"] = None
-    assert client.get("/work-logs", headers={"X-Session-Id": "5"}).status_code == 401  # unknown session
-    assert client.get("/users").status_code == 200                           # login screen list stays public
+    assert client.get("/work-logs", headers={"Authorization": "Bearer nope"}).status_code == 401  # unknown token
+    assert client.get("/users").status_code == 200                                       # login screen list stays public
     assert client.get("/health").status_code == 200
+
+
+def test_new_endpoints_always_require_login(monkeypatch, fake_db):
+    monkeypatch.setattr(config, "AUTH_ENFORCED", False)   # even with the legacy switch off
+    assert client.post("/inspections", json={}).status_code == 401
+    assert client.get("/reports/daily").status_code == 401
+    fake_db["fetch_one"] = {"id": 1, "username": "bob", "role": "staff", "first_name": "B", "last_name": "B"}
+    h = {"Authorization": "Bearer t"}
+    assert client.get("/reports/daily", headers=h).status_code == 403     # staff cannot read reports
+    assert client.get("/reports/daily.csv", headers=h).status_code == 403
 
 
 def test_unhandled_error_hides_details(fake_db):
@@ -138,3 +148,26 @@ def test_unhandled_error_hides_details(fake_db):
     d.fetch_all = boom
     r = client.get("/users")
     assert r.status_code == 500 and r.json() == {"error": "Internal server error"}
+
+
+def test_presign(monkeypatch):
+    from app.routers import uploads
+
+    class FakeS3:
+        def generate_presigned_url(self, op, Params, ExpiresIn):
+            assert op == "put_object" and Params["ContentType"] == "image/jpeg" and ExpiresIn == 300
+            return "https://bucket.example/" + Params["Key"] + "?sig=1"
+
+    monkeypatch.setattr(uploads, "_s3", lambda: FakeS3())
+    r = client.get("/uploads/presign", params={"project": "lumico", "mode": "before",
+                                               "filename": "../../etc/pass wd", "contentType": "image/jpeg"})
+    assert r.status_code == 200
+    key = r.json()["key"]
+    assert key.startswith("lumico/before/") and key.endswith(".jpg") and ".." not in key and " " not in key
+    assert r.json()["uploadURL"].startswith("https://bucket.example/lumico/before/")
+
+
+def test_presign_rejects_non_images():
+    r = client.get("/uploads/presign", params={"project": "p", "mode": "m", "filename": "f",
+                                               "contentType": "text/html"})
+    assert r.status_code == 400

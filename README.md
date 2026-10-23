@@ -60,3 +60,31 @@ cp -r app certs lambda_handler.py build/
 ```
 
 Lambda handler: `lambda_handler.handler`. Memory 512 MB, timeout 15 s.
+
+## Deploying
+
+`./deploy.sh` runs the tests, builds the zip, uploads it to the `lumico-api` Lambda in the
+Lumico account (640527821355), waits for the update, and smoke-tests `/health`.
+It refuses to run if the AWS profile is any other account.
+
+One-time setup of the `lumico` profile (create a dedicated IAM user in the Lumico account,
+NOT your admin user, with only this policy):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": [
+      "lambda:UpdateFunctionCode",
+      "lambda:GetFunction",
+      "lambda:GetFunctionConfiguration",
+      "lambda:InvokeFunction"
+    ],
+    "Resource": "arn:aws:lambda:ap-southeast-2:640527821355:function:lumico-api"
+  }]
+}
+```
+
+Then `aws configure --profile lumico` (region `ap-southeast-2`) and run `./deploy.sh`.
+The function itself, its role and its environment variables are created once in the console.

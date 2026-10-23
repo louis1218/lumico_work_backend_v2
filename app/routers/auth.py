@@ -1,4 +1,6 @@
 """Replaces: SiteLogin, siteLogout, reset-password Lambdas. These are public (no session needed)."""
+import secrets
+
 import bcrypt
 from fastapi import APIRouter, Body, HTTPException
 
@@ -23,9 +25,10 @@ def login(payload: dict = Body(...)):
     if not user or not bcrypt.checkpw(password.encode(), user["password_hash"].encode()):
         raise HTTPException(status_code=401, detail=_BAD_LOGIN)
 
+    token = secrets.token_urlsafe(32)
     session = db.run(
-        "INSERT INTO user_sessions (username, site) VALUES (%s, %s) RETURNING id, login_time",
-        (username, payload.get("site") or "unknown"),
+        "INSERT INTO user_sessions (username, site, token) VALUES (%s, %s, %s) RETURNING id, login_time",
+        (username, payload.get("site") or "unknown", token),
     )
     return {
         "message": "Login successful",
@@ -34,6 +37,7 @@ def login(payload: dict = Body(...)):
         "last_name": user["last_name"],
         "role": user["role"],
         "session_id": session["id"],
+        "session_token": token,
         "login_time": session["login_time"],
     }
 

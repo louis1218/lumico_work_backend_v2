@@ -19,7 +19,27 @@ def _bool(name: str, default: bool) -> bool:
 
 # Turn on once the frontend sends the X-Session-Id header (see README).
 AUTH_ENFORCED = _bool("AUTH_ENFORCED", False)
-SESSION_HOURS = int(os.environ.get("SESSION_HOURS", "24"))
+SESSION_HOURS = int(os.environ.get("SESSION_HOURS", "12"))   # matches the 12h the frontend uses
+S3_BUCKET = os.environ.get("S3_BUCKET", "solar-farm-uploads")
+S3_REGION = os.environ.get("S3_REGION", "ap-southeast-2")
+S3_PUBLIC_BASE = f"https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com"
+TIMEZONE = os.environ.get("TIMEZONE", "Australia/Adelaide")   # used only when the app sends no work_date
+
+# Solar farm layout
+BLOCKS = 25
+TRACKERS_PER_BLOCK = 180
+DEFECT_TYPES = [
+    "Cracked glass",
+    "Shattered glass",
+    "Hotspot or burn mark",
+    "Delamination or discolouration",
+    "Damaged frame",
+    "Loose or misaligned",
+    "Cable or connector damage",
+    "Heavy soiling",
+    "Shading",
+    "Other",
+]
 
 CORS_ORIGINS = [
     o.strip()
@@ -58,7 +78,10 @@ def db_credentials() -> dict:
 def conninfo() -> dict:
     """psycopg connection kwargs. Verifies the RDS certificate when the CA bundle is present."""
     creds = db_credentials()
-    if os.path.exists(CERT_PATH):
+    local_mode = os.environ.get("DB_SSLMODE")  # local testing only, ignored on Lambda
+    if local_mode and not os.environ.get("AWS_LAMBDA_FUNCTION_NAME"):
+        creds = {**creds, "sslmode": local_mode}
+    elif os.path.exists(CERT_PATH):
         creds = {**creds, "sslmode": "verify-full", "sslrootcert": CERT_PATH}
     else:
         # Local dev only. Production packages must include certs/global-bundle.pem.
