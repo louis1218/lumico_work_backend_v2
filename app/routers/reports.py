@@ -12,12 +12,22 @@ from .inspections import parse_day, today_local
 
 router = APIRouter(prefix="/reports", tags=["reports"], dependencies=[Depends(require_admin)])
 
-# Latest check of each tracker on the day, so re-checking a tracker never double counts.
+# Rows that count for the day. A tracker can be submitted many times (one broken panel at a time).
+# Each panel counts once (its newest record wins); a "no issues" row only counts while the
+# tracker has no broken panel recorded that day.
 _LATEST = """
-    SELECT DISTINCT ON (site, block, tracker) *
-    FROM inspections
-    WHERE work_date = %(day)s AND (%(site)s::text IS NULL OR site = %(site)s)
-    ORDER BY site, block, tracker, inspected_at DESC
+    SELECT i.*
+    FROM (
+        SELECT DISTINCT ON (site, block, tracker, COALESCE(panel, 0)) *
+        FROM inspections
+        WHERE work_date = %(day)s AND (%(site)s::text IS NULL OR site = %(site)s)
+        ORDER BY site, block, tracker, COALESCE(panel, 0), inspected_at DESC, id DESC
+    ) i
+    WHERE i.panel IS NOT NULL
+       OR NOT EXISTS (
+            SELECT 1 FROM inspections x
+            WHERE x.site = i.site AND x.block = i.block AND x.tracker = i.tracker
+              AND x.work_date = i.work_date AND x.panel IS NOT NULL)
 """
 
 
@@ -35,16 +45,16 @@ def daily_report(date: str | None = None, site: str | None = None):
     totals = db.fetch_one(
         f"""
         WITH latest AS ({_LATEST})
-        SELECT COUNT(*) AS trackers_checked,
+        SELECT COUNT(DISTINCT (site, block, tracker)) AS trackers_checked,
                COUNT(DISTINCT (site, block)) AS blocks_touched,
-               COUNT(*) FILTER (WHERE broken_panels > 0) AS trackers_with_issues,
+               COUNT(DISTINCT (site, block, tracker)) FILTER (WHERE broken_panels > 0) AS trackers_with_issues,
                COALESCE(SUM(broken_panels), 0) AS broken_panels
         FROM latest
         """,
         p,
     )
     n_inspections = db.fetch_one(
-        "SELECT COUNT(*) AS n FROM inspections WHERE work_date = %(day)s AND (%(site)s::text IS NULL OR site = %(site)s)", p
+        "SELECT COUNT(DISTINCT batch_id) AS n FROM inspections WHERE work_date = %(day)s AND (%(site)s::text IS NULL OR site = %(site)s)", p
     )["n"]
     n_sites = 1 if site else max(len({r["site"] for r in db.fetch_all(
         "SELECT DISTINCT site FROM inspections WHERE work_date = %s", (day,))}), 1)
@@ -54,8 +64,8 @@ def daily_report(date: str | None = None, site: str | None = None):
         for r in db.fetch_all(
             f"""
             WITH latest AS ({_LATEST})
-            SELECT block, COUNT(*) AS trackers_checked,
-                   COUNT(*) FILTER (WHERE broken_panels > 0) AS issues,
+            SELECT block, COUNT(DISTINCT (site, tracker)) AS trackers_checked,
+                   COUNT(DISTINCT (site, tracker)) FILTER (WHERE broken_panels > 0) AS issues,
                    COALESCE(SUM(broken_panels), 0) AS broken_panels
             FROM latest GROUP BY block
             """,
@@ -76,9 +86,9 @@ def daily_report(date: str | None = None, site: str | None = None):
     staff = db.fetch_all(
         """
         SELECT i.username, u.first_name, u.last_name,
-               COUNT(*) AS inspections,
+               COUNT(DISTINCT i.batch_id) AS inspections,
                COUNT(DISTINCT (i.site, i.block, i.tracker)) AS trackers_checked,
-               COUNT(*) FILTER (WHERE i.broken_panels > 0) AS issues,
+               COUNT(DISTINCT (i.site, i.block, i.tracker)) FILTER (WHERE i.broken_panels > 0) AS issues,
                COALESCE(SUM(i.broken_panels), 0) AS broken_panels,
                MIN(i.inspected_at) AS first_at, MAX(i.inspected_at) AS last_at
         FROM inspections i LEFT JOIN users u ON u.username = i.username
@@ -92,11 +102,35 @@ def daily_report(date: str | None = None, site: str | None = None):
     issues = db.fetch_all(
         f"""
         WITH latest AS ({_LATEST})
-        SELECT l.id, l.site, l.block, l.tracker, l.broken_panels, l.defects, l.notes, l.photo_keys,
+        SELECT l.id, l.site, l.block, l.tracker, l.panel, l.broken_panels, l.defects, l.notes, l.photo_keys,
                l.username, u.first_name, u.last_name, l.inspected_at
         FROM latest l LEFT JOIN users u ON u.username = l.username
         WHERE l.broken_panels > 0
-        ORDER BY l.block, l.tracker
+        ORDER BY l.site, l.block, l.tracker, l.panel NULLS LAST
+        """,
+        p,
+    )
+
+    trackers = db.fetch_all(
+        f"""
+        WITH latest AS ({_LATEST})
+        SELECT l.site, l.block, l.tracker, SUM(l.broken_panels) AS broken_panels,
+               MAX(l.username) AS username, MAX(u.first_name) AS first_name, MAX(u.last_name) AS last_name,
+               MAX(l.inspected_at) AS inspected_at
+        FROM latest l LEFT JOIN users u ON u.username = l.username
+        GROUP BY l.site, l.block, l.tracker
+        ORDER BY l.site, l.block, l.tracker
+        """,
+        p,
+    )
+
+    defect_counts = db.fetch_all(
+        f"""
+        WITH latest AS ({_LATEST})
+        SELECT d AS defect, COUNT(*) AS panels
+        FROM latest, unnest(defects) AS d
+        WHERE broken_panels > 0
+        GROUP BY d ORDER BY panels DESC, d
         """,
         p,
     )
@@ -114,6 +148,8 @@ def daily_report(date: str | None = None, site: str | None = None):
         "blocks": blocks,
         "staff": staff,
         "issues": issues,
+        "trackers": trackers,
+        "defect_counts": defect_counts,
     }
 
 
@@ -126,7 +162,7 @@ def staff_progress(date_from: str | None = None, date_to: str | None = None, sit
     rows = db.fetch_all(
         """
         SELECT i.work_date, i.username, u.first_name, u.last_name,
-               COUNT(*) AS inspections,
+               COUNT(DISTINCT i.batch_id) AS inspections,
                COUNT(DISTINCT (i.site, i.block, i.tracker)) AS trackers_checked,
                COALESCE(SUM(i.broken_panels), 0) AS broken_panels
         FROM inspections i LEFT JOIN users u ON u.username = i.username
@@ -144,22 +180,22 @@ def daily_csv(date: str | None = None, site: str | None = None):
     day, site = parse_day(date), _site(site)
     rows = db.fetch_all(
         """
-        SELECT i.work_date, i.site, i.block, i.tracker, i.broken_panels, i.defects, i.notes,
+        SELECT i.work_date, i.site, i.block, i.tracker, i.panel, i.broken_panels, i.defects, i.notes,
                i.username, u.first_name, u.last_name, i.inspected_at, i.photo_keys
         FROM inspections i LEFT JOIN users u ON u.username = i.username
         WHERE i.work_date = %(day)s AND (%(site)s::text IS NULL OR i.site = %(site)s)
-        ORDER BY i.site, i.block, i.tracker, i.inspected_at
+        ORDER BY i.site, i.block, i.tracker, i.inspected_at, i.panel NULLS FIRST
         """,
         {"day": day, "site": site},
     )
     out = io.StringIO()
     w = csv.writer(out)
-    w.writerow(["date", "site", "block", "tracker", "broken_panels", "defects", "notes",
+    w.writerow(["date", "site", "block", "tracker", "panel", "broken_panels", "defects", "notes",
                 "staff", "inspected_at", "photo_urls"])
     for r in rows:
         name = f"{r['first_name'] or ''} {r['last_name'] or ''}".strip() or r["username"]
         w.writerow([
-            r["work_date"].isoformat(), r["site"], r["block"], r["tracker"], r["broken_panels"],
+            r["work_date"].isoformat(), r["site"], r["block"], r["tracker"], r["panel"] or "", r["broken_panels"],
             "; ".join(r["defects"] or []), r["notes"], name, r["inspected_at"].isoformat(),
             " ".join(f"{config.S3_PUBLIC_BASE}/{k}" for k in (r["photo_keys"] or [])),
         ])

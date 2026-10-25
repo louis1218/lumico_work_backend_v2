@@ -26,6 +26,7 @@ def client():
     su = psycopg.connect(host="127.0.0.1", port=int(PORT), user="pgtest", dbname="lumico_test", autocommit=True)
     su.execute((HERE / "legacy_schema.sql").read_text())
     su.execute((HERE.parent / "migrations" / "001_inspections.sql").read_text())
+    su.execute((HERE.parent / "migrations" / "002_panels.sql").read_text())
     h = bcrypt.hashpw(b"pw", bcrypt.gensalt(4)).decode()
     for u, f, l, role in [("ann", "Ann", "Admin", "admin"), ("bob", "Bob", "Builder", "staff"), ("cy", "Cy", "Young", "staff")]:
         su.execute("INSERT INTO users (username, password_hash, first_name, last_name, role) VALUES (%s,%s,%s,%s,%s)",
@@ -50,8 +51,13 @@ def login(client, user):
 
 
 def body(**kw):
-    base = {"site": "test", "block": 3, "tracker": 7, "broken_panels": 0, "work_date": TODAY}
+    base = {"site": "test", "block": 3, "tracker": 7, "work_date": TODAY}
     return {**base, **kw}
+
+
+def panel(n, defects=("Cracked glass",), photos=None, notes=""):
+    return {"panel": n, "defects": list(defects), "notes": notes,
+            "photo_keys": photos if photos is not None else [f"maint/b3/p{n}.jpg"]}
 
 
 def test_full_flow(client):
@@ -59,33 +65,46 @@ def test_full_flow(client):
 
     # --- validation
     assert client.post("/inspections", json=body()).status_code == 401
-    for bad in (body(block=26), body(block=0), body(tracker=181), body(broken_panels=-1), body(broken_panels="3"),
-                body(broken_panels=2, defects=["Cracked glass"], photo_keys=[]),
-                body(broken_panels=2, defects=["Made up"], photo_keys=["a/b.jpg"]),
-                body(broken_panels=2, photo_keys=["../../etc/passwd"])):
+    for bad in (body(block=26), body(block=0), body(tracker=181),
+                body(panels="x"), body(panels=[panel(0)]), body(panels=[panel(91)]), body(panels=[panel("3")]),
+                body(panels=[panel(5), panel(5)]),                       # same panel twice
+                body(panels=[panel(5, photos=[])]),                      # photo required for a broken panel
+                body(panels=[panel(5, defects=["Made up"])]),
+                body(panels=[panel(5, photos=["../../etc/passwd"])]),
+                body(broken_panels=2)):                                   # old app version
         assert client.post("/inspections", json=bad, headers=bob).status_code == 400, bad
 
-    # --- bob: tracker 7 clean, then re-checked with damage (latest must win); tracker 8 damaged
-    assert client.post("/inspections", json=body(), headers=bob).status_code == 200
-    r = client.post("/inspections", json=body(broken_panels=3, defects=["Cracked glass", "Hotspot or burn mark"],
-                                              notes="3 cracked near the east end", photo_keys=["maint/b3/t7_1.jpg"]), headers=bob)
-    assert r.status_code == 200, r.text
-    assert client.post("/inspections", json=body(tracker=8, broken_panels=1, defects=["Damaged frame"],
-                                                 photo_keys=["maint/b3/t8_1.jpg", "maint/b3/t8_2.jpg"]), headers=bob).status_code == 200
-    # --- cy: block 4 tracker 1 clean, block 3 tracker 9 clean
+    # --- bob: tracker 7 clean, then re-checked with two broken panels (latest must win); tracker 8 one panel
+    r = client.post("/inspections", json=body(), headers=bob)
+    assert r.status_code == 200 and r.json()["panels_saved"] == 0
+    r = client.post("/inspections", json=body(panels=[
+        panel(13, defects=["Damaged frame"]),
+        panel(12, defects=["Cracked glass", "Hotspot or burn mark"], notes="east end", photos=["maint/b3/p12a.jpg", "maint/b3/p12b.jpg"]),
+    ]), headers=bob)
+    assert r.status_code == 200 and r.json()["panels_saved"] == 2, r.text
+    assert client.post("/inspections", json=body(tracker=8, panels=[panel(5)]), headers=bob).status_code == 200
+    # a second submission for the same tracker adds another broken panel (nothing is replaced)
+    assert client.post("/inspections", json=body(tracker=8, panels=[panel(6)]), headers=bob).status_code == 200
+    st8 = client.get("/inspections/block-status", params={"site": "test", "block": 3, "work_date": TODAY}, headers=bob).json()
+    t8 = {t["tracker"]: t for t in st8["trackers"]}[8]
+    assert [p["panel"] for p in t8["panels"]] == [5, 6] and t8["broken_panels"] == 2
+    # --- cy: block 4 tracker 1 clean, block 3 tracker 9 clean (with an optional photo)
     assert client.post("/inspections", json=body(block=4, tracker=1), headers=cy).status_code == 200
-    assert client.post("/inspections", json=body(tracker=9), headers=cy).status_code == 200
+    assert client.post("/inspections", json=body(tracker=9, photo_keys=["maint/b3/t9.jpg"], notes="all good"), headers=cy).status_code == 200
     # username comes from the token, not the body
     client.post("/inspections", json={**body(tracker=10), "username": "ann"}, headers=cy)
 
     # --- staff views
     st = client.get("/inspections/block-status", params={"site": "test", "block": 3, "work_date": TODAY}, headers=bob).json()
     by = {t["tracker"]: t for t in st["trackers"]}
-    assert sorted(by) == [7, 8, 9, 10] and by[7]["broken_panels"] == 3 and by[9]["username"] == "cy"
-    assert by[10]["username"] == "cy"
+    assert sorted(by) == [7, 8, 9, 10] and by[9]["username"] == "cy" and by[10]["username"] == "cy"
+    assert by[7]["broken_panels"] == 2 and [p["panel"] for p in by[7]["panels"]] == [12, 13]
+    assert by[7]["panels"][0]["photo_keys"] == ["maint/b3/p12a.jpg", "maint/b3/p12b.jpg"]
+    assert by[9]["panels"] == [] and by[9]["photo_keys"] == ["maint/b3/t9.jpg"] and by[9]["notes"] == "all good"
     mine = client.get("/inspections/mine", params={"site": "test", "work_date": TODAY}, headers=bob).json()
-    assert (mine["inspections"], mine["trackers_checked"], mine["issues"], mine["broken_panels"]) == (3, 2, 2, 4)
-    assert client.get("/inspections/options", headers=bob).json()["blocks"] == 25
+    assert (mine["inspections"], mine["trackers_checked"], mine["issues"], mine["broken_panels"]) == (4, 2, 2, 4)
+    opts = client.get("/inspections/options", headers=bob).json()
+    assert opts["blocks"] == 25 and opts["panels_per_tracker"] == 90
 
     # --- admin gate
     assert client.get("/reports/daily", params={"date": TODAY}).status_code == 401
@@ -97,33 +116,37 @@ def test_full_flow(client):
     assert rep.status_code == 200, rep.text
     rep = rep.json()
     t = rep["totals"]
-    # raw saves = 6 (bob 3, cy 3). Distinct trackers = b3t7, b3t8, b3t9, b3t10, b4t1 = 5
-    assert (t["inspections"], t["trackers_checked"], t["blocks_touched"]) == (6, 5, 2)
+    # saves = 6 (bob 3, cy 3). Distinct trackers = b3t7, b3t8, b3t9, b3t10, b4t1 = 5
+    assert (t["inspections"], t["trackers_checked"], t["blocks_touched"]) == (7, 5, 2)
     assert (t["trackers_with_issues"], t["broken_panels"], t["trackers_total"]) == (2, 4, 4500)
     assert len(rep["blocks"]) == 25
     b3 = rep["blocks"][2]
     assert (b3["block"], b3["trackers_checked"], b3["trackers_total"], b3["issues"], b3["broken_panels"]) == (3, 4, 180, 2, 4)
     assert rep["blocks"][0]["trackers_checked"] == 0 and rep["blocks"][3]["trackers_checked"] == 1
     staff = {s["username"]: s for s in rep["staff"]}
-    assert staff["bob"]["inspections"] == 3 and staff["bob"]["trackers_checked"] == 2 and staff["bob"]["issues"] == 2
+    assert staff["bob"]["inspections"] == 4 and staff["bob"]["trackers_checked"] == 2 and staff["bob"]["issues"] == 2
     assert staff["cy"]["trackers_checked"] == 3 and staff["bob"]["first_name"] == "Bob"
-    assert [(i["block"], i["tracker"], i["broken_panels"]) for i in rep["issues"]] == [(3, 7, 3), (3, 8, 1)]
-    assert rep["issues"][0]["photo_keys"] == ["maint/b3/t7_1.jpg"] and "Cracked glass" in rep["issues"][0]["defects"]
+    assert [(i["block"], i["tracker"], i["panel"], i["broken_panels"]) for i in rep["issues"]] == [(3, 7, 12, 1), (3, 7, 13, 1), (3, 8, 5, 1), (3, 8, 6, 1)]
+    assert rep["issues"][0]["photo_keys"] == ["maint/b3/p12a.jpg", "maint/b3/p12b.jpg"]
+    assert "Cracked glass" in rep["issues"][0]["defects"] and rep["issues"][0]["notes"] == "east end"
     assert rep["sites"] == ["test"] and rep["photo_base"].startswith("https://")
+    assert [(x["block"], x["tracker"], x["broken_panels"]) for x in rep["trackers"]] == [(3, 7, 2), (3, 8, 2), (3, 9, 0), (3, 10, 0), (4, 1, 0)]
+    assert {d["defect"]: d["panels"] for d in rep["defect_counts"]} == {"Cracked glass": 3, "Damaged frame": 1, "Hotspot or burn mark": 1}
 
     # site filter + empty day
     assert client.get("/reports/daily", params={"date": TODAY, "site": "nowhere"}, headers=ann).json()["totals"]["trackers_checked"] == 0
     empty = client.get("/reports/daily", params={"date": "2020-01-01"}, headers=ann).json()
     assert empty["totals"]["trackers_checked"] == 0 and len(empty["blocks"]) == 25 and empty["issues"] == []
+    assert empty["trackers"] == [] and empty["defect_counts"] == []
 
     # --- staff progress + csv
     sp = client.get("/reports/staff-progress", params={"date_to": TODAY}, headers=ann).json()
-    assert {(r["username"], r["trackers_checked"]) for r in sp["rows"]} == {("bob", 2), ("cy", 3)}
+    assert {(r["username"], r["trackers_checked"], r["broken_panels"]) for r in sp["rows"]} == {("bob", 2, 4), ("cy", 3, 0)}
     assert client.get("/reports/staff-progress", params={"date_from": "2026-01-01", "date_to": TODAY}, headers=ann).status_code == 400
     csv_r = client.get("/reports/daily.csv", params={"date": TODAY}, headers=ann)
     assert csv_r.status_code == 200 and "attachment" in csv_r.headers["content-disposition"]
-    lines = csv_r.text.lstrip("﻿").strip().splitlines()
-    assert lines[0].startswith("date,site,block,tracker") and len(lines) == 7
+    lines = csv_r.text.lstrip("\ufeff").strip().splitlines()
+    assert lines[0].startswith("date,site,block,tracker,panel") and len(lines) == 9   # header + 8 saved rows
     assert "Cracked glass; Hotspot or burn mark" in csv_r.text and "Bob Builder" in csv_r.text
 
     # --- logout kills the token
