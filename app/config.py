@@ -19,7 +19,7 @@ def _bool(name: str, default: bool) -> bool:
 
 # Turn on once the frontend sends the X-Session-Id header (see README).
 AUTH_ENFORCED = _bool("AUTH_ENFORCED", False)
-SESSION_HOURS = int(os.environ.get("SESSION_HOURS", "12"))   # matches the 12h the frontend uses
+SESSION_HOURS = int(os.environ.get("SESSION_HOURS", "168"))   # 7 days: staff may be offline for a few days. Keep equal to the frontend login length
 S3_BUCKET = os.environ.get("S3_BUCKET", "solar-farm-uploads")
 S3_REGION = os.environ.get("S3_REGION", "ap-southeast-2")
 S3_PUBLIC_BASE = f"https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com"

@@ -6,7 +6,7 @@ One tracker check = one batch of rows:
 """
 import re
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Body, Depends, HTTPException
@@ -17,6 +17,10 @@ from ..auth import require_user
 router = APIRouter(prefix="/inspections", tags=["inspections"])
 
 _KEY = re.compile(r"^[A-Za-z0-9_./-]+$")
+
+# A check saved on a phone with no signal keeps the time it really happened, as long as it is
+# no older than this. Anything older (or in the future) is stamped with the server time instead.
+MAX_OFFLINE_DAYS = 14
 
 
 def today_local() -> date:
@@ -48,6 +52,32 @@ def _keys(value, maxlen: int = 20) -> list[str]:
 
 def _text(value, limit: int = 2000) -> str:
     return str(value or "").strip()[:limit]
+
+
+def _batch_id(value) -> str | None:
+    """The phone makes the batch id, so sending the same check twice can never save it twice."""
+    if value in (None, ""):
+        return None
+    try:
+        return str(uuid.UUID(str(value)))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid batch_id")
+
+
+def _client_time(value) -> datetime | None:
+    """When the phone says the check happened (ISO 8601 with a time zone), or None to use now()."""
+    if not value:
+        return None
+    try:
+        when = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        return None
+    now = datetime.now(timezone.utc)
+    if when > now + timedelta(minutes=5) or when < now - timedelta(days=MAX_OFFLINE_DAYS):
+        return None
+    return when
 
 
 @router.get("/options")
@@ -99,15 +129,33 @@ def create_inspection(payload: dict = Body(...), user: dict = Depends(require_us
             rows.append((n, 1, defects, _text(p.get("notes")), keys))
         rows.sort(key=lambda r: r[0])
 
-    batch = str(uuid.uuid4())
-    values = ", ".join(["(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::uuid)"] * len(rows))
+    batch = _batch_id(payload.get("batch_id")) or str(uuid.uuid4())
+    inspected_at = _client_time(payload.get("inspected_at"))
+
+    # Already saved? (the phone retries after a lost reply). Answer as if it just saved.
+    done = db.fetch_one(
+        """
+        SELECT COUNT(*) AS n, COUNT(panel) AS panels_saved, MAX(inspected_at) AS inspected_at
+        FROM inspections WHERE batch_id = %s::uuid
+        """,
+        (batch,),
+    )
+    if done and done["n"]:
+        return {
+            "message": "Inspection saved",
+            "batch_id": batch,
+            "panels_saved": done["panels_saved"],
+            "inspected_at": done["inspected_at"],
+        }
+
+    values = ", ".join(["(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::uuid, COALESCE(%s::timestamptz, now()))"] * len(rows))
     params: list = []
     for panel, broken, defects, notes, keys in rows:
-        params += [site, block, tracker, user["username"], work_date, panel, broken, defects, notes, keys, batch]
+        params += [site, block, tracker, user["username"], work_date, panel, broken, defects, notes, keys, batch, inspected_at]
     saved = db.fetch_all(
         f"""
         INSERT INTO inspections
-            (site, block, tracker, username, work_date, panel, broken_panels, defects, notes, photo_keys, batch_id)
+            (site, block, tracker, username, work_date, panel, broken_panels, defects, notes, photo_keys, batch_id, inspected_at)
         VALUES {values}
         RETURNING id, inspected_at
         """,
