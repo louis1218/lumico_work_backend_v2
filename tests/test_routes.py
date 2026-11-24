@@ -171,3 +171,29 @@ def test_presign_rejects_non_images():
     r = client.get("/uploads/presign", params={"project": "p", "mode": "m", "filename": "f",
                                                "contentType": "text/html"})
     assert r.status_code == 400
+
+
+def test_upload_photo_via_api(monkeypatch):
+    import base64
+    from app.routers import uploads
+    put = {}
+
+    class FakeS3:
+        def put_object(self, **kw):
+            put.update(kw)
+
+    monkeypatch.setattr(uploads, "_s3", lambda: FakeS3())
+    body = {"project": "inspection_lilyvale", "mode": "block3", "filename": "repair_t12_p7_before_ab",
+            "contentType": "image/jpeg", "data": base64.b64encode(b"jpegbytes").decode()}
+    r = client.post("/uploads/photo", json=body)
+    assert r.status_code == 200, r.text
+    key = r.json()["key"]
+    assert key.startswith("inspection_lilyvale/block3/repair_t12_p7_before_ab_") and key.endswith(".jpg")
+    assert put["Key"] == key and put["Body"] == b"jpegbytes" and put["ContentType"] == "image/jpeg"
+
+
+def test_upload_photo_rejects_bad_data():
+    body = {"project": "p", "mode": "m", "filename": "f", "contentType": "image/jpeg", "data": "not base64!!"}
+    assert client.post("/uploads/photo", json=body).status_code == 400
+    body["contentType"] = "text/plain"
+    assert client.post("/uploads/photo", json=body).status_code == 400
