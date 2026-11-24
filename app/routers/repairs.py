@@ -92,3 +92,39 @@ def my_day(site: str, work_date: str | None = None, user: dict = Depends(require
         (user["username"], site, day),
     )
     return {"date": day.isoformat(), **totals}
+
+
+@router.get("/block")
+def block_repairs(site: str, block: int, user: dict = Depends(require_user)):
+    """Every repair recorded in one block (newest first), so the form can show what is already done."""
+    if not 1 <= block <= config.BLOCKS:
+        raise HTTPException(status_code=400, detail="Unknown block")
+    rows = db.fetch_all(
+        """
+        SELECT r.tracker, r.panel, r.action, r.notes, r.before_keys, r.after_keys,
+               r.username, r.repaired_at, u.first_name, u.last_name
+        FROM repairs r
+        LEFT JOIN users u ON u.username = r.username
+        WHERE r.site = %s AND r.block = %s
+        ORDER BY r.tracker, r.panel, r.repaired_at DESC
+        """,
+        (site.strip().lower(), block),
+    )
+    return {
+        "block": block,
+        "repairs": [
+            {
+                "tracker": r["tracker"],
+                "panel": r["panel"],
+                "action": r["action"],
+                "notes": r["notes"],
+                "before_keys": list(r["before_keys"] or []),
+                "after_keys": list(r["after_keys"] or []),
+                "username": r["username"],
+                "first_name": r["first_name"],
+                "last_name": r["last_name"],
+                "repaired_at": r["repaired_at"],
+            }
+            for r in rows
+        ],
+    }

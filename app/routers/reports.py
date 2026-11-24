@@ -204,3 +204,89 @@ def daily_csv(date: str | None = None, site: str | None = None):
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="inspections-{day.isoformat()}.csv"'},
     )
+
+
+_REPAIR_SITE = "(%(site)s::text IS NULL OR r.site = %(site)s)"
+
+
+@router.get("/repairs")
+def repairs_report(date: str | None = None, site: str | None = None):
+    """Panels fixed or replaced on one day, with before and after photos."""
+    day, site = parse_day(date), _site(site)
+    p = {"day": day, "site": site}
+
+    totals = db.fetch_one(
+        f"""
+        SELECT COUNT(*) AS panels,
+               COUNT(*) FILTER (WHERE r.action = 'fix') AS fixed,
+               COUNT(*) FILTER (WHERE r.action = 'replace') AS replaced,
+               COUNT(DISTINCT (r.site, r.block, r.tracker)) AS trackers,
+               COUNT(DISTINCT (r.site, r.block)) AS blocks_touched
+        FROM repairs r WHERE r.work_date = %(day)s AND {_REPAIR_SITE}
+        """,
+        p,
+    )
+    staff = db.fetch_all(
+        f"""
+        SELECT r.username, u.first_name, u.last_name,
+               COUNT(*) AS panels,
+               COUNT(*) FILTER (WHERE r.action = 'fix') AS fixed,
+               COUNT(*) FILTER (WHERE r.action = 'replace') AS replaced,
+               MIN(r.repaired_at) AS first_at, MAX(r.repaired_at) AS last_at
+        FROM repairs r LEFT JOIN users u ON u.username = r.username
+        WHERE r.work_date = %(day)s AND {_REPAIR_SITE}
+        GROUP BY r.username, u.first_name, u.last_name
+        ORDER BY panels DESC, r.username
+        """,
+        p,
+    )
+    repairs = db.fetch_all(
+        f"""
+        SELECT r.id, r.site, r.block, r.tracker, r.panel, r.action, r.notes, r.before_keys, r.after_keys,
+               r.username, u.first_name, u.last_name, r.repaired_at
+        FROM repairs r LEFT JOIN users u ON u.username = r.username
+        WHERE r.work_date = %(day)s AND {_REPAIR_SITE}
+        ORDER BY r.site, r.block, r.tracker, r.panel
+        """,
+        p,
+    )
+    return {
+        "date": day.isoformat(),
+        "site": site,
+        "photo_base": config.S3_PUBLIC_BASE,
+        "totals": totals,
+        "staff": staff,
+        "repairs": repairs,
+    }
+
+
+@router.get("/repairs.csv")
+def repairs_csv(date: str | None = None, site: str | None = None):
+    day, site = parse_day(date), _site(site)
+    rows = db.fetch_all(
+        f"""
+        SELECT r.work_date, r.site, r.block, r.tracker, r.panel, r.action, r.notes,
+               r.username, u.first_name, u.last_name, r.repaired_at, r.before_keys, r.after_keys
+        FROM repairs r LEFT JOIN users u ON u.username = r.username
+        WHERE r.work_date = %(day)s AND {_REPAIR_SITE}
+        ORDER BY r.site, r.block, r.tracker, r.panel
+        """,
+        {"day": day, "site": site},
+    )
+    out = io.StringIO()
+    w = csv.writer(out)
+    w.writerow(["date", "site", "block", "tracker", "panel", "action", "notes", "staff", "repaired_at",
+                "before_photo_urls", "after_photo_urls"])
+    for r in rows:
+        name = f"{r['first_name'] or ''} {r['last_name'] or ''}".strip() or r["username"]
+        w.writerow([
+            r["work_date"].isoformat(), r["site"], r["block"], r["tracker"], r["panel"],
+            "Fixed" if r["action"] == "fix" else "Replaced", r["notes"], name, r["repaired_at"].isoformat(),
+            " ".join(f"{config.S3_PUBLIC_BASE}/{k}" for k in (r["before_keys"] or [])),
+            " ".join(f"{config.S3_PUBLIC_BASE}/{k}" for k in (r["after_keys"] or [])),
+        ])
+    return Response(
+        content="\ufeff" + out.getvalue(),  # BOM so Excel reads UTF-8 correctly
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="repairs-{day.isoformat()}.csv"'},
+    )
