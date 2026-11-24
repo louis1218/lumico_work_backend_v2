@@ -7,7 +7,18 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import config
-from .routers import auth, barcode, inspections, reports, sessions, timesheet, uploads, users, work_logs
+from .routers import (
+    auth,
+    barcode,
+    inspections,
+    reports,
+    repairs,
+    sessions,
+    timesheet,
+    uploads,
+    users,
+    work_logs,
+)
 
 logger = logging.getLogger("lumico")
 logging.basicConfig(level=logging.INFO)
@@ -44,6 +55,16 @@ def health():
     return {"status": "ok"}
 
 
-for r in (auth.router, users.router, timesheet.router, sessions.router, work_logs.router, barcode.router, uploads.router,
-          inspections.router, reports.router):
+for r in (
+    auth.router,
+    users.router,
+    timesheet.router,
+    sessions.router,
+    work_logs.router,
+    barcode.router,
+    uploads.router,
+    inspections.router,
+    repairs.router,
+    reports.router,
+):
     app.include_router(r)
