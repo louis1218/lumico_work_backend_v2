@@ -40,7 +40,7 @@ def daily_report(date: str | None = None, site: str | None = None):
     day, site = parse_day(date), _site(site)
     p = {"day": day, "site": site}
 
-    sites = [r["site"] for r in db.fetch_all("SELECT DISTINCT site FROM inspections ORDER BY site")]
+    sites = _all_sites()
 
     totals = db.fetch_one(
         f"""
@@ -207,13 +207,30 @@ def daily_csv(date: str | None = None, site: str | None = None):
 
 
 _REPAIR_SITE = "(%(site)s::text IS NULL OR r.site = %(site)s)"
+_REPAIR_DAYS = "r.work_date BETWEEN %(start)s AND %(day)s"
+
+
+def _all_sites() -> list[str]:
+    """Every site with inspections or repairs, for the site picker."""
+    return [r["site"] for r in db.fetch_all(
+        "SELECT site FROM inspections UNION SELECT site FROM repairs ORDER BY site")]
+
+
+def _repair_range(date: str | None, date_from: str | None):
+    day = parse_day(date)
+    start = parse_day(date_from) if date_from else day
+    if start > day or (day - start).days > 366:
+        raise HTTPException(status_code=400, detail="Choose a range of up to a year")
+    return start, day
 
 
 @router.get("/repairs")
-def repairs_report(date: str | None = None, site: str | None = None):
-    """Panels fixed or replaced on one day, with before and after photos."""
-    day, site = parse_day(date), _site(site)
-    p = {"day": day, "site": site}
+def repairs_report(date: str | None = None, site: str | None = None, date_from: str | None = None):
+    """Panels fixed or replaced, with before and after photos. One day, or date_from..date."""
+    start, day = _repair_range(date, date_from)
+    site = _site(site)
+    p = {"start": start, "day": day, "site": site}
+    where = f"{_REPAIR_DAYS} AND {_REPAIR_SITE}"
 
     totals = db.fetch_one(
         f"""
@@ -221,8 +238,26 @@ def repairs_report(date: str | None = None, site: str | None = None):
                COUNT(*) FILTER (WHERE r.action = 'fix') AS fixed,
                COUNT(*) FILTER (WHERE r.action = 'replace') AS replaced,
                COUNT(DISTINCT (r.site, r.block, r.tracker)) AS trackers,
-               COUNT(DISTINCT (r.site, r.block)) AS blocks_touched
-        FROM repairs r WHERE r.work_date = %(day)s AND {_REPAIR_SITE}
+               COUNT(DISTINCT (r.site, r.block)) AS blocks_touched,
+               COUNT(DISTINCT r.work_date) AS days,
+               COALESCE(SUM(cardinality(r.before_keys)), 0) AS before_photos,
+               COALESCE(SUM(cardinality(r.after_keys)), 0) AS after_photos,
+               COUNT(*) FILTER (WHERE cardinality(r.before_keys) > 0 AND cardinality(r.after_keys) > 0) AS with_both,
+               MIN(r.repaired_at) AS first_at, MAX(r.repaired_at) AS last_at
+        FROM repairs r WHERE {where}
+        """,
+        p,
+    )
+    blocks = db.fetch_all(
+        f"""
+        SELECT r.block,
+               COUNT(*) AS panels,
+               COUNT(*) FILTER (WHERE r.action = 'fix') AS fixed,
+               COUNT(*) FILTER (WHERE r.action = 'replace') AS replaced,
+               COUNT(DISTINCT (r.site, r.tracker)) AS trackers,
+               COALESCE(SUM(cardinality(r.before_keys) + cardinality(r.after_keys)), 0) AS photos
+        FROM repairs r WHERE {where}
+        GROUP BY r.block ORDER BY r.block
         """,
         p,
     )
@@ -234,7 +269,7 @@ def repairs_report(date: str | None = None, site: str | None = None):
                COUNT(*) FILTER (WHERE r.action = 'replace') AS replaced,
                MIN(r.repaired_at) AS first_at, MAX(r.repaired_at) AS last_at
         FROM repairs r LEFT JOIN users u ON u.username = r.username
-        WHERE r.work_date = %(day)s AND {_REPAIR_SITE}
+        WHERE {where}
         GROUP BY r.username, u.first_name, u.last_name
         ORDER BY panels DESC, r.username
         """,
@@ -243,35 +278,39 @@ def repairs_report(date: str | None = None, site: str | None = None):
     repairs = db.fetch_all(
         f"""
         SELECT r.id, r.site, r.block, r.tracker, r.panel, r.action, r.notes, r.before_keys, r.after_keys,
-               r.username, u.first_name, u.last_name, r.repaired_at
+               r.username, u.first_name, u.last_name, r.repaired_at, r.work_date
         FROM repairs r LEFT JOIN users u ON u.username = r.username
-        WHERE r.work_date = %(day)s AND {_REPAIR_SITE}
-        ORDER BY r.site, r.block, r.tracker, r.panel
+        WHERE {where}
+        ORDER BY r.site, r.block, r.tracker, r.panel, r.repaired_at
         """,
         p,
     )
     return {
         "date": day.isoformat(),
+        "date_from": start.isoformat(),
         "site": site,
+        "sites": _all_sites(),
         "photo_base": config.S3_PUBLIC_BASE,
         "totals": totals,
+        "blocks": blocks,
         "staff": staff,
         "repairs": repairs,
     }
 
 
 @router.get("/repairs.csv")
-def repairs_csv(date: str | None = None, site: str | None = None):
-    day, site = parse_day(date), _site(site)
+def repairs_csv(date: str | None = None, site: str | None = None, date_from: str | None = None):
+    start, day = _repair_range(date, date_from)
+    site = _site(site)
     rows = db.fetch_all(
         f"""
         SELECT r.work_date, r.site, r.block, r.tracker, r.panel, r.action, r.notes,
                r.username, u.first_name, u.last_name, r.repaired_at, r.before_keys, r.after_keys
         FROM repairs r LEFT JOIN users u ON u.username = r.username
-        WHERE r.work_date = %(day)s AND {_REPAIR_SITE}
+        WHERE {_REPAIR_DAYS} AND {_REPAIR_SITE}
         ORDER BY r.site, r.block, r.tracker, r.panel
         """,
-        {"day": day, "site": site},
+        {"start": start, "day": day, "site": site},
     )
     out = io.StringIO()
     w = csv.writer(out)
@@ -288,5 +327,5 @@ def repairs_csv(date: str | None = None, site: str | None = None):
     return Response(
         content="\ufeff" + out.getvalue(),  # BOM so Excel reads UTF-8 correctly
         media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="repairs-{day.isoformat()}.csv"'},
+        headers={"Content-Disposition": f'attachment; filename="repairs-{start.isoformat() + "_to_" if start != day else ""}{day.isoformat()}.csv"'},
     )

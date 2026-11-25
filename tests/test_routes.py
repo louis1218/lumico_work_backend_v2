@@ -197,3 +197,22 @@ def test_upload_photo_rejects_bad_data():
     assert client.post("/uploads/photo", json=body).status_code == 400
     body["contentType"] = "text/plain"
     assert client.post("/uploads/photo", json=body).status_code == 400
+
+
+def test_repairs_report_range_and_photo_counts(fake_db):
+    from app.auth import require_admin
+    app.dependency_overrides[require_admin] = lambda: {"username": "boss", "role": "admin"}
+    try:
+        fake_db["fetch_one"] = {"panels": 2, "fixed": 1, "replaced": 1, "before_photos": 3, "after_photos": 2, "with_both": 2}
+        fake_db["fetch_all"] = []
+        r = client.get("/reports/repairs", params={"date": "2026-11-25", "date_from": "2026-11-20", "site": "manildra"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["date_from"] == "2026-11-20" and body["date"] == "2026-11-25" and body["site"] == "manildra"
+        assert body["totals"]["before_photos"] == 3 and "blocks" in body and "sites" in body
+        sql = " ".join(s for s, _ in calls)
+        assert "BETWEEN" in sql and "cardinality" in sql and "UNION SELECT site FROM repairs" in sql
+        assert client.get("/reports/repairs", params={"date": "2026-11-20", "date_from": "2026-11-25"}).status_code == 400
+        assert client.get("/reports/repairs.csv", params={"date": "2026-11-25", "date_from": "2026-11-20"}).status_code == 200
+    finally:
+        app.dependency_overrides.clear()
