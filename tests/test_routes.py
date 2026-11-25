@@ -216,3 +216,17 @@ def test_repairs_report_range_and_photo_counts(fake_db):
         assert client.get("/reports/repairs.csv", params={"date": "2026-11-25", "date_from": "2026-11-20"}).status_code == 200
     finally:
         app.dependency_overrides.clear()
+
+
+def test_repairs_today_counts_all_staff(fake_db):
+    from app.auth import require_user
+    app.dependency_overrides[require_user] = lambda: {"username": "louisli", "role": "admin"}
+    try:
+        fake_db["fetch_one"] = {"panels": 29, "fixed": 1, "replaced": 28, "trackers": 18}
+        r = client.get("/repairs/today", params={"site": "Manildra", "work_date": "2026-11-25"})
+        assert r.status_code == 200, r.text
+        assert r.json()["fixed"] == 1 and r.json()["replaced"] == 28
+        sql, params = calls[-1]
+        assert "username" not in sql and params[0] == "manildra"
+    finally:
+        app.dependency_overrides.clear()

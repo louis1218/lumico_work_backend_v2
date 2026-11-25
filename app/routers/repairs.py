@@ -94,6 +94,23 @@ def my_day(site: str, work_date: str | None = None, user: dict = Depends(require
     return {"date": day.isoformat(), **totals}
 
 
+@router.get("/today")
+def site_day(site: str, work_date: str | None = None, user: dict = Depends(require_user)):
+    """Repair totals for the whole site for the day, all staff together."""
+    day, site = parse_day(work_date), site.strip().lower()
+    totals = db.fetch_one(
+        """
+        SELECT COUNT(*) AS panels,
+               COUNT(*) FILTER (WHERE action = 'fix') AS fixed,
+               COUNT(*) FILTER (WHERE action = 'replace') AS replaced,
+               COUNT(DISTINCT (block, tracker)) AS trackers
+        FROM repairs WHERE site = %s AND work_date = %s
+        """,
+        (site, day),
+    )
+    return {"date": day.isoformat(), **totals}
+
+
 @router.get("/block")
 def block_repairs(site: str, block: int, user: dict = Depends(require_user)):
     """Every repair recorded in one block (newest first), so the form can show what is already done."""
