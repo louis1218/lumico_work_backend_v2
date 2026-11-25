@@ -230,3 +230,25 @@ def test_repairs_today_counts_all_staff(fake_db):
         assert "username" not in sql and params[0] == "manildra"
     finally:
         app.dependency_overrides.clear()
+
+
+
+def test_repairs_report_includes_recorded_serials(monkeypatch, fake_db):
+    from app.auth import require_admin
+    app.dependency_overrides[require_admin] = lambda: {"username": "boss", "role": "admin"}
+    rows = [{"id": 1, "site": "manildra", "block": 3, "tracker": 12, "panel": 7, "action": "replace", "notes": "",
+             "before_keys": ["b.jpg"], "after_keys": ["a.jpg"], "username": "u", "first_name": "A", "last_name": "B",
+             "repaired_at": "2026-11-25T03:00:00+00:00", "work_date": "2026-11-25"}]
+
+    def fetch_all(sql, params=()):
+        if "FROM photo_serials" in sql:
+            return [{"photo_key": "b.jpg", "serial": "170927110104", "status": "read"}]
+        return rows if "FROM repairs r LEFT JOIN users" in sql and "r.id" in sql else []
+    monkeypatch.setattr(db, "fetch_all", fetch_all)
+    fake_db["fetch_one"] = {"panels": 1}
+    try:
+        r = client.get("/reports/repairs", params={"date": "2026-11-25", "site": "manildra"})
+        assert r.status_code == 200, r.text
+        assert r.json()["serials"] == {"b.jpg": {"status": "read", "serial": "170927110104"}}
+    finally:
+        app.dependency_overrides.clear()

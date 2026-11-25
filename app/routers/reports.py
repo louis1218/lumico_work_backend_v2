@@ -286,6 +286,7 @@ def repairs_report(date: str | None = None, site: str | None = None, date_from: 
         p,
     )
     return {
+        "serials": _serial_map(_photo_keys(repairs)),
         "date": day.isoformat(),
         "date_from": start.isoformat(),
         "site": site,
@@ -296,6 +297,18 @@ def repairs_report(date: str | None = None, site: str | None = None, date_from: 
         "staff": staff,
         "repairs": repairs,
     }
+
+
+def _photo_keys(rows: list[dict]) -> list[str]:
+    return [k for r in rows for k in [*(r["before_keys"] or []), *(r["after_keys"] or [])]]
+
+
+def _serial_map(keys: list[str]) -> dict[str, dict]:
+    """photo key -> {"status", "serial"} for photos whose panel serial has been recorded."""
+    if not keys:
+        return {}
+    rows = db.fetch_all("SELECT photo_key, serial, status FROM photo_serials WHERE photo_key = ANY(%s)", (keys,))
+    return {r["photo_key"]: {"status": r["status"], "serial": r["serial"]} for r in rows}
 
 
 @router.get("/repairs.csv")
@@ -314,13 +327,19 @@ def repairs_csv(date: str | None = None, site: str | None = None, date_from: str
     )
     out = io.StringIO()
     w = csv.writer(out)
+    found = _serial_map(_photo_keys(rows))
+
+    def serial_of(keys):
+        return " ".join(found[k]["serial"] for k in (keys or []) if found.get(k, {}).get("serial"))
+
     w.writerow(["date", "site", "block", "tracker", "panel", "action", "notes", "staff", "repaired_at",
-                "before_photo_urls", "after_photo_urls"])
+                "old_panel_serial", "new_panel_serial", "before_photo_urls", "after_photo_urls"])
     for r in rows:
         name = f"{r['first_name'] or ''} {r['last_name'] or ''}".strip() or r["username"]
         w.writerow([
             r["work_date"].isoformat(), r["site"], r["block"], r["tracker"], r["panel"],
             "Fixed" if r["action"] == "fix" else "Replaced", r["notes"], name, r["repaired_at"].isoformat(),
+            serial_of(r["before_keys"]), serial_of(r["after_keys"]),
             " ".join(f"{config.S3_PUBLIC_BASE}/{k}" for k in (r["before_keys"] or [])),
             " ".join(f"{config.S3_PUBLIC_BASE}/{k}" for k in (r["after_keys"] or [])),
         ])
