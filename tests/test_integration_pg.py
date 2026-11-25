@@ -104,7 +104,7 @@ def test_full_flow(client):
     mine = client.get("/inspections/mine", params={"site": "test", "work_date": TODAY}, headers=bob).json()
     assert (mine["inspections"], mine["trackers_checked"], mine["issues"], mine["broken_panels"]) == (4, 2, 2, 4)
     opts = client.get("/inspections/options", headers=bob).json()
-    assert opts["blocks"] == 25 and opts["panels_per_tracker"] == 90
+    assert opts["blocks"] == 25 and opts["panels_per_tracker"] == 360
 
     # --- admin gate
     assert client.get("/reports/daily", params={"date": TODAY}).status_code == 401
