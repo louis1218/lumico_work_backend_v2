@@ -250,5 +250,6 @@ def test_repairs_report_includes_recorded_serials(monkeypatch, fake_db):
         r = client.get("/reports/repairs", params={"date": "2026-11-25", "site": "manildra"})
         assert r.status_code == 200, r.text
         assert r.json()["serials"] == {"b.jpg": {"status": "read", "serial": "170927110104"}}
+        assert r.json()["panels_to_date"] == 1
     finally:
         app.dependency_overrides.clear()

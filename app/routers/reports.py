@@ -248,6 +248,11 @@ def repairs_report(date: str | None = None, site: str | None = None, date_from: 
         """,
         p,
     )
+    # The whole job so far, from the first repair up to the report's last day (for the progress chart)
+    to_date = db.fetch_one(
+        f"SELECT COUNT(*) AS panels FROM repairs r WHERE r.work_date <= %(day)s AND {_REPAIR_SITE}",
+        p,
+    )
     blocks = db.fetch_all(
         f"""
         SELECT r.block,
@@ -287,6 +292,7 @@ def repairs_report(date: str | None = None, site: str | None = None, date_from: 
     )
     return {
         "serials": _serial_map(_photo_keys(repairs)),
+        "panels_to_date": (to_date or {}).get("panels", 0),
         "date": day.isoformat(),
         "date_from": start.isoformat(),
         "site": site,
