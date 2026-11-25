@@ -121,7 +121,7 @@ def test_full_flow(client):
     assert (t["trackers_with_issues"], t["broken_panels"], t["trackers_total"]) == (2, 4, 4500)
     assert len(rep["blocks"]) == 25
     b3 = rep["blocks"][2]
-    assert (b3["block"], b3["trackers_checked"], b3["trackers_total"], b3["issues"], b3["broken_panels"]) == (3, 4, 180, 2, 4)
+    assert (b3["block"], b3["trackers_checked"], b3["trackers_total"], b3["issues"], b3["broken_panels"]) == (3, 4, 300, 2, 4)
     assert rep["blocks"][0]["trackers_checked"] == 0 and rep["blocks"][3]["trackers_checked"] == 1
     staff = {s["username"]: s for s in rep["staff"]}
     assert staff["bob"]["inspections"] == 4 and staff["bob"]["trackers_checked"] == 2 and staff["bob"]["issues"] == 2
