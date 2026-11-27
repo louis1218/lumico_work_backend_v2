@@ -27,7 +27,7 @@ TIMEZONE = os.environ.get("TIMEZONE", "Australia/Adelaide")   # used only when t
 
 # Solar farm layout
 BLOCKS = 25
-TRACKERS_PER_BLOCK = 300
+TRACKERS_PER_BLOCK = 500
 PANELS_PER_TRACKER = 360
 DEFECT_TYPES = [
     "Cracked glass",
